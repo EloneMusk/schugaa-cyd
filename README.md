@@ -1,110 +1,88 @@
 # Schugaa CYD
 
 `Schugaa CYD` is a standalone blood sugar display for the ESP32 Cheap Yellow Display (`ESP32-2432S028R`).  
-The device connects to Wi-Fi, logs into LibreLinkUp directly from the ESP32, fetches current glucose data plus graph history, and renders it locally on the touchscreen display.
+It connects to LibreLinkUp directly from the ESP32 and renders the glucose graph on-device.
 
-## What It Does
+## What This Project Does
 
-- Shows current glucose value and trend
-- Draws a glucose history graph with range coloring
-- Fetches LibreLinkUp data directly on the ESP32
-- Supports automatic light/dark mode based on time of day
-- Supports manual theme toggle by touching the screen
+- Connects to Wi-Fi and fetches glucose data from LibreLinkUp
+- Draws current value, trend, history graph, and status info on CYD
+- Runs an always-on configuration hotspot + web portal so credentials can be changed anytime
+- Supports automatic light/dark mode (time-based) and manual touch toggle
 
-No Python backend, Raspberry Pi, or always-on computer is required.
+## New Login Flow (No Reflash Needed for Credential Changes)
 
-## Hardware
+On every boot, the device starts a hotspot and keeps it running:
 
-- ESP32 Cheap Yellow Display (`ESP32-2432S028R`)
-- USB cable for flashing
-- Wi-Fi connection
-- LibreLinkUp account with follower access to the sensor data
+- AP SSID: from `CONFIG_AP_SSID` in [`include/secrets.h`](/Users/abhishek/Downloads/schugaa-cyd/include/secrets.h)
+- AP password: from `CONFIG_AP_PASSWORD` in [`include/secrets.h`](/Users/abhishek/Downloads/schugaa-cyd/include/secrets.h)
+- Portal URL: `http://192.168.4.1`
+
+From the portal, user can:
+
+- Enter Libre email
+- Enter Libre password
+- Select region from all supported regions (dropdown)
+- Optionally set patient ID
+- Click **Login & Save** to validate credentials and store them
+
+Success/error messages are shown on the same page.
+
+Credentials are saved in ESP32 persistent storage (NVS), not in source files.
+
+## About `secrets.h` Saving
+
+An ESP32 firmware cannot safely rewrite your local source file `include/secrets.h` on your computer after flashing.  
+Instead, the portal stores credentials in NVS and provides a **generated secrets header download** at:
+
+- `http://192.168.4.1/secrets.h`
+
+This keeps runtime config easy while still letting you export a header snippet when needed.
 
 ## Project Structure
 
 - [`src/main.cpp`](/Users/abhishek/Downloads/schugaa-cyd/src/main.cpp)  
-  Main firmware: Wi-Fi, LibreLinkUp login, data fetching, rendering, and touch handling
+  Main firmware (Wi-Fi, AP portal, Libre auth/data fetch, UI rendering, touch/theme)
 - [`include/secrets.template.h`](/Users/abhishek/Downloads/schugaa-cyd/include/secrets.template.h)  
-  Safe template you can commit to Git
+  Safe template to commit
 - [`include/secrets.h`](/Users/abhishek/Downloads/schugaa-cyd/include/secrets.h)  
-  Local credentials file used for building on your machine
+  Local build-time defaults and AP settings (ignored by git)
 - [`platformio.ini`](/Users/abhishek/Downloads/schugaa-cyd/platformio.ini)  
-  PlatformIO board and library configuration
+  PlatformIO project config
 
 ## Setup
 
 1. Copy [`include/secrets.template.h`](/Users/abhishek/Downloads/schugaa-cyd/include/secrets.template.h) to `include/secrets.h`.
-2. Fill in your Wi-Fi and LibreLinkUp credentials in `include/secrets.h`.
-3. Build and flash the firmware.
-
-`include/secrets.h` is ignored by Git, so your real credentials stay local.
+2. Set at least:
+   - `WIFI_SSID`
+   - `WIFI_PASSWORD`
+   - `CONFIG_AP_SSID`
+   - `CONFIG_AP_PASSWORD`
+3. Build and flash.
+4. Open portal at `192.168.4.1` on the hotspot to set Libre credentials.
 
 ## Build With VS Code
 
-1. Install [Visual Studio Code](https://code.visualstudio.com/).
-2. Install the PlatformIO extension.
-3. Open this project folder in VS Code.
-4. Make sure `include/secrets.h` exists and contains your real values.
-5. Use PlatformIO:
-   - `Build`
-   - `Upload`
-   - `Monitor`
+1. Install VS Code + PlatformIO extension.
+2. Open this folder in VS Code.
+3. Click PlatformIO `Build`, `Upload`, and `Monitor`.
+4. Use serial baud `115200`.
 
-Useful serial speed:
-
-```text
-115200
-```
-
-## Build Without VS Code
-
-You can use PlatformIO Core from the terminal.
-
-1. Install PlatformIO Core if needed:
-
-```bash
-python3 -m pip install -U platformio
-```
-
-2. From the project root, build:
+## Build Without VS Code (CLI)
 
 ```bash
 platformio run
-```
-
-3. Upload to the device:
-
-```bash
 platformio run -t upload
-```
-
-4. Open the serial monitor:
-
-```bash
 platformio device monitor -b 115200
 ```
 
-5. If you want a clean rebuild:
+Clean rebuild:
 
 ```bash
 platformio run -t clean
 platformio run
 ```
 
-## Notes
-
-- The firmware fetches data every 60 seconds.
-- The project uses direct LibreLinkUp HTTPS calls from the ESP32.
-- The touch screen can toggle between light and dark mode.
-- Automatic theme switching uses the time zone from `UI_TIMEZONE_TZ`.
-
 ## Git Safety
 
-Files now ignored from Git include:
-
-- local secrets file
-- Python cache files
-- local cache artifacts
-- local `.env` leftovers
-
-The file intended for Git is [`include/secrets.template.h`](/Users/abhishek/Downloads/schugaa-cyd/include/secrets.template.h).
+`include/secrets.h` is ignored by git. Commit only [`include/secrets.template.h`](/Users/abhishek/Downloads/schugaa-cyd/include/secrets.template.h).

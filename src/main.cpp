@@ -5,6 +5,9 @@
 #include <TFT_eSPI.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <Preferences.h>
 #include <mbedtls/sha256.h>
 #include <time.h>
 
@@ -15,6 +18,7 @@ TFT_eSPI tft = TFT_eSPI();
 static const unsigned long FETCH_INTERVAL_MS = 60000;
 static const int MAX_HISTORY_POINTS = 64;
 static const char* UI_THEME_VERSION = "standalone-libre-v2";
+static const byte DNS_PORT = 53;
 static const char* LIBRE_LINK_UP_VERSION = "4.16.0";
 static const char* LIBRE_LINK_UP_PRODUCT = "llu.ios";
 static const char* LIBRE_USER_AGENT =
@@ -69,6 +73,14 @@ static const RegionHost REGION_HOSTS[] = {
     {"US", "api-us.libreview.io"},
 };
 
+#ifndef CONFIG_AP_SSID
+#define CONFIG_AP_SSID "Schugaa-Setup"
+#endif
+
+#ifndef CONFIG_AP_PASSWORD
+#define CONFIG_AP_PASSWORD "schugaa123"
+#endif
+
 GlucosePoint history[MAX_HISTORY_POINTS];
 int historyCount = 0;
 int currentGlucose = 0;
@@ -77,8 +89,12 @@ int sensorDaysLeft = 0;
 String currentTimestamp = "--";
 String connectionStatus = "BOOT";
 String lastUpdatedStr = "--";
+String libreEmail = LIBRE_EMAIL;
+String librePassword = LIBRE_PASSWORD;
 String libreRegion = LIBRE_REGION;
 String selectedPatientId = LIBRE_PATIENT_ID;
+String configMessage = "";
+bool configMessageSuccess = false;
 LibreAuthTicket authTicket;
 unsigned long lastFetchTime = 0;
 UiThemeMode currentThemeMode = THEME_DARK;
@@ -103,8 +119,25 @@ uint16_t COLOR_YELLOW;
 uint16_t COLOR_GREEN;
 uint16_t COLOR_ORANGE;
 
+WebServer configServer(80);
+DNSServer dnsServer;
+Preferences prefs;
+bool configPortalStarted = false;
+
 void connectWiFi();
 bool fetchGlucoseData();
+void startConfigPortal();
+void handleConfigPortal();
+void setupConfigRoutes();
+void loadConfigFromPreferences();
+void saveConfigToPreferences();
+void sendConfigPage(const String& message = "", bool success = false);
+void handleConfigRoot();
+void handleConfigSave();
+void handleConfigSecretsDownload();
+String buildRegionOptions(const String& selectedRegion);
+String htmlEscape(const String& input);
+bool isKnownRegion(const String& region);
 bool ensureLibreAuthentication();
 bool loginToLibre(bool allowRedirect = true);
 bool fetchLibreConnections(LibrePatientSnapshot& snapshot);
@@ -211,6 +244,251 @@ void drawBoldText(const String& text, int x, int y, int font, uint16_t fg, uint1
             tft.drawString(text, x + dx, y + dy, font);
         }
     }
+}
+
+String htmlEscape(const String& input) {
+    String out = input;
+    out.replace("&", "&amp;");
+    out.replace("<", "&lt;");
+    out.replace(">", "&gt;");
+    out.replace("\"", "&quot;");
+    out.replace("'", "&#39;");
+    return out;
+}
+
+bool isKnownRegion(const String& region) {
+    for (const auto& entry : REGION_HOSTS) {
+        if (region.equalsIgnoreCase(entry.region)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+String buildRegionOptions(const String& selectedRegion) {
+    String options = "";
+    for (const auto& entry : REGION_HOSTS) {
+        options += "<option value='";
+        options += entry.region;
+        options += "'";
+        if (selectedRegion.equalsIgnoreCase(entry.region)) {
+            options += " selected";
+        }
+        options += ">";
+        options += entry.region;
+        options += "</option>";
+    }
+    return options;
+}
+
+void loadConfigFromPreferences() {
+    if (!prefs.begin("schugaa", true)) {
+        Serial.println("Preferences read open failed, using compiled defaults.");
+        return;
+    }
+
+    libreEmail = prefs.getString("libre_email", libreEmail);
+    librePassword = prefs.getString("libre_pass", librePassword);
+    libreRegion = prefs.getString("libre_region", libreRegion);
+    selectedPatientId = prefs.getString("patient_id", selectedPatientId);
+    prefs.end();
+
+    if (!isKnownRegion(libreRegion)) {
+        libreRegion = LIBRE_REGION;
+    }
+
+    Serial.printf("Loaded config. Region=%s, Email set=%s\n",
+                  libreRegion.c_str(), libreEmail.length() > 0 ? "yes" : "no");
+}
+
+void saveConfigToPreferences() {
+    if (!prefs.begin("schugaa", false)) {
+        Serial.println("Preferences write open failed.");
+        return;
+    }
+    prefs.putString("libre_email", libreEmail);
+    prefs.putString("libre_pass", librePassword);
+    prefs.putString("libre_region", libreRegion);
+    prefs.putString("patient_id", selectedPatientId);
+    prefs.end();
+}
+
+void sendConfigPage(const String& message, bool success) {
+    String banner = "";
+    if (message.length() > 0) {
+        banner += "<div class='status ";
+        banner += success ? "ok" : "err";
+        banner += "'>";
+        banner += htmlEscape(message);
+        banner += "</div>";
+    }
+
+    String html;
+    html.reserve(8500);
+    html += "<!doctype html><html><head><meta charset='utf-8'>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+    html += "<title>Schugaa Setup</title>";
+    html += "<style>";
+    html += "body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;";
+    html += "background:linear-gradient(160deg,#07111a,#12303f);color:#eaf6ff;padding:18px;}";
+    html += ".card{max-width:560px;margin:0 auto;background:rgba(8,18,24,.85);border:1px solid #2d5a70;";
+    html += "border-radius:16px;padding:18px;box-shadow:0 18px 40px rgba(0,0,0,.35);}";
+    html += "h1{margin:0 0 8px;font-size:1.35rem;}p{margin:0 0 12px;color:#b9d7e8;}";
+    html += "label{display:block;font-size:.9rem;margin:10px 0 6px;color:#bfe9ff;}";
+    html += "input,select{width:100%;box-sizing:border-box;padding:11px;border-radius:10px;";
+    html += "border:1px solid #426879;background:#0c2430;color:#fff;font-size:1rem;}";
+    html += "button{margin-top:14px;width:100%;padding:12px;border:0;border-radius:10px;";
+    html += "font-weight:700;font-size:1rem;cursor:pointer;background:#2ee880;color:#083118;}";
+    html += ".small{margin-top:10px;font-size:.85rem;color:#9ec2d2;}";
+    html += ".status{margin:10px 0;padding:10px;border-radius:10px;font-size:.92rem;}";
+    html += ".ok{background:#153f2a;border:1px solid #3ec074;color:#d8ffe8;}";
+    html += ".err{background:#4a1f24;border:1px solid #d96f78;color:#ffe2e6;}";
+    html += ".row{display:grid;grid-template-columns:1fr 1fr;gap:10px;}";
+    html += "@media (max-width:560px){.row{grid-template-columns:1fr;}}";
+    html += "a{color:#8dd4ff;text-decoration:none;}";
+    html += "</style></head><body><div class='card'>";
+    html += "<h1>Schugaa Libre Setup</h1>";
+    html += "<p>Hotspot stays active. You can update credentials anytime.</p>";
+    html += banner;
+    html += "<form method='POST' action='/save'>";
+    html += "<label>Libre Email</label>";
+    html += "<input name='email' type='email' required value='";
+    html += htmlEscape(libreEmail);
+    html += "'>";
+    html += "<label>Libre Password</label>";
+    html += "<input name='password' type='password' required value='";
+    html += htmlEscape(librePassword);
+    html += "'>";
+    html += "<div class='row'><div>";
+    html += "<label>Region</label><select name='region'>";
+    html += buildRegionOptions(libreRegion);
+    html += "</select></div><div>";
+    html += "<label>Patient ID (optional)</label>";
+    html += "<input name='patientId' type='text' value='";
+    html += htmlEscape(selectedPatientId);
+    html += "'></div></div>";
+    html += "<button type='submit'>Login & Save</button></form>";
+    html += "<p class='small'>AP: <strong>";
+    html += CONFIG_AP_SSID;
+    html += "</strong> &middot; Portal: <a href='http://192.168.4.1'>192.168.4.1</a></p>";
+    html += "<p class='small'><a href='/secrets.h'>Download generated secrets.h snippet</a></p>";
+    html += "</div></body></html>";
+
+    configServer.send(200, "text/html", html);
+}
+
+void handleConfigRoot() {
+    sendConfigPage(configMessage, configMessageSuccess);
+    configMessage = "";
+}
+
+void handleConfigSecretsDownload() {
+    String generated = "#ifndef SECRETS_H\n#define SECRETS_H\n\n";
+    generated += "#define WIFI_SSID     \"" + String(WIFI_SSID) + "\"\n";
+    generated += "#define WIFI_PASSWORD \"" + String(WIFI_PASSWORD) + "\"\n";
+    generated += "#define LIBRE_EMAIL      \"" + libreEmail + "\"\n";
+    generated += "#define LIBRE_PASSWORD   \"" + librePassword + "\"\n";
+    generated += "#define LIBRE_REGION     \"" + libreRegion + "\"\n";
+    generated += "#define LIBRE_PATIENT_ID \"" + selectedPatientId + "\"\n";
+    generated += "#define UI_TIMEZONE_TZ   \"" + String(UI_TIMEZONE_TZ) + "\"\n";
+    generated += "\n#endif // SECRETS_H\n";
+
+    configServer.sendHeader("Content-Disposition", "attachment; filename=\"secrets.generated.h\"");
+    configServer.send(200, "text/plain", generated);
+}
+
+void handleConfigSave() {
+    String email = configServer.arg("email");
+    String password = configServer.arg("password");
+    String region = configServer.arg("region");
+    String patientId = configServer.arg("patientId");
+    email.trim();
+    password.trim();
+    region.trim();
+    region.toUpperCase();
+    patientId.trim();
+
+    if (email.length() == 0 || password.length() == 0) {
+        sendConfigPage("Email and password are required.", false);
+        return;
+    }
+    if (!isKnownRegion(region)) {
+        sendConfigPage("Selected region is invalid.", false);
+        return;
+    }
+
+    String oldEmail = libreEmail;
+    String oldPassword = librePassword;
+    String oldRegion = libreRegion;
+    String oldPatient = selectedPatientId;
+
+    libreEmail = email;
+    librePassword = password;
+    libreRegion = region;
+    selectedPatientId = patientId;
+    clearAuthTicket();
+
+    bool loginOk = loginToLibre(true);
+    if (loginOk) {
+        saveConfigToPreferences();
+        configMessage = "Login successful. Credentials saved on device.";
+        configMessageSuccess = true;
+        fetchGlucoseData();
+        renderUI();
+        sendConfigPage(configMessage, true);
+        return;
+    }
+
+    libreEmail = oldEmail;
+    librePassword = oldPassword;
+    libreRegion = oldRegion;
+    selectedPatientId = oldPatient;
+    clearAuthTicket();
+    String err = "Login failed. Check email/password/region and try again.";
+    if (connectionStatus.length() > 0) {
+        err += " (" + connectionStatus + ")";
+    }
+    sendConfigPage(err, false);
+}
+
+void setupConfigRoutes() {
+    configServer.on("/", HTTP_GET, handleConfigRoot);
+    configServer.on("/save", HTTP_POST, handleConfigSave);
+    configServer.on("/secrets.h", HTTP_GET, handleConfigSecretsDownload);
+    configServer.on("/generate_204", HTTP_GET, handleConfigRoot);
+    configServer.on("/hotspot-detect.html", HTTP_GET, handleConfigRoot);
+    configServer.on("/ncsi.txt", HTTP_GET, handleConfigRoot);
+    configServer.on("/connecttest.txt", HTTP_GET, handleConfigRoot);
+    configServer.onNotFound(handleConfigRoot);
+}
+
+void startConfigPortal() {
+    if (configPortalStarted) {
+        return;
+    }
+
+    WiFi.mode(WIFI_AP_STA);
+    bool apOk = WiFi.softAP(CONFIG_AP_SSID, CONFIG_AP_PASSWORD);
+    if (apOk) {
+        dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+        setupConfigRoutes();
+        configServer.begin();
+        configPortalStarted = true;
+        Serial.print("Config AP started: ");
+        Serial.println(CONFIG_AP_SSID);
+        Serial.print("Portal IP: ");
+        Serial.println(WiFi.softAPIP());
+    } else {
+        Serial.println("Failed to start config AP.");
+    }
+}
+
+void handleConfigPortal() {
+    if (!configPortalStarted) {
+        return;
+    }
+    dnsServer.processNextRequest();
+    configServer.handleClient();
 }
 
 bool syncClock() {
@@ -574,7 +852,7 @@ bool loginToLibre(bool allowRedirect) {
     addLibreHeaders(http);
 
     const String body =
-        String("{\"email\":\"") + LIBRE_EMAIL + "\",\"password\":\"" + LIBRE_PASSWORD + "\"}";
+        String("{\"email\":\"") + libreEmail + "\",\"password\":\"" + librePassword + "\"}";
 
     Serial.print("Libre login region: ");
     Serial.println(libreRegion);
@@ -863,6 +1141,11 @@ void setup() {
     tft.invertDisplay(true);
     applyTheme(THEME_DARK);
 
+    loadConfigFromPreferences();
+    startConfigPortal();
+
+    drawStartupScreen("Schugaa CYD", "Config AP: 192.168.4.1");
+    delay(1200);
     drawStartupScreen("Schugaa CYD", "Connecting to WiFi...");
 
     connectWiFi();
@@ -875,6 +1158,8 @@ void setup() {
 }
 
 void loop() {
+    handleConfigPortal();
+
     if (WiFi.status() != WL_CONNECTED) {
         connectWiFi();
         syncClock();
@@ -917,6 +1202,11 @@ void connectWiFi() {
 
 bool fetchGlucoseData() {
     lastFetchTime = millis();
+
+    if (libreEmail.length() == 0 || librePassword.length() == 0) {
+        connectionStatus = "Cfg Required";
+        return false;
+    }
 
     LibrePatientSnapshot snapshot;
     if (!fetchLibreConnections(snapshot)) {

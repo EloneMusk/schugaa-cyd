@@ -5,6 +5,10 @@
 #define WIFI_SSID     "YOUR_WIFI_NAME"
 #define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
 
+// Always-on configuration hotspot (AP) for changing Libre credentials from phone/laptop
+#define CONFIG_AP_SSID     "Schugaa-Setup"
+#define CONFIG_AP_PASSWORD "schugaa123"
+
 // LibreLinkUp account used for direct login from the device
 #define LIBRE_EMAIL      "your-email@example.com"
 #define LIBRE_PASSWORD   "your-libre-password"
